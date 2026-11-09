@@ -1,16 +1,15 @@
-
 {
   "name": "ceske-vanocni-pohadky",
-  "version": "1.0.0",
-  "private": true,
+  "version": "1.0.1",
+  "description": "Stremio addon - České vánoční pohádky z TMDB",
   "type": "module",
   "scripts": {
     "start": "node src/index.js"
   },
-  "engines": {
-    "node": ">=20"
-  },
   "dependencies": {
     "stremio-addon-sdk": "^1.6.10"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
