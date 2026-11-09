@@ -1,9 +1,7 @@
-
 services:
   - type: web
     name: ceske-vanocni-pohadky
     runtime: node
-    plan: free
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /manifest.json
