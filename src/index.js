@@ -1,274 +1,336 @@
+import stremioAddonSdk from "stremio-addon-sdk";
 
-import { addonBuilder, serveHTTP } from "stremio-addon-sdk";
+const { addonBuilder, serveHTTP } = stremioAddonSdk;
 
+const TMDB_API_KEY = process.env.TMDB_API_KEY;
 const PORT = process.env.PORT || 7000;
-const API_KEY = process.env.TMDB_API_KEY;
-const LANGUAGE = "cs-CZ";
-const CACHE_TIME = 6 * 60 * 60 * 1000;
 
-if (!API_KEY) {
-  throw new Error("Chybí TMDB_API_KEY");
+if (!TMDB_API_KEY) {
+  console.error("CHYBA: Chybí TMDB_API_KEY v prostředí Render.");
+  process.exit(1);
 }
+
+const BASE_URL = "https://api.themoviedb.org/3";
 
 const manifest = {
   id: "cz.vanocni.pohadky",
-  version: "1.0.0",
+  version: "1.0.1",
   name: "České vánoční pohádky",
-  description: "České a československé vánoční pohádky podle popularity TMDB",
+  description:
+    "Katalog českých a československých vánočních pohádek seřazených podle popularity z TMDB.",
+  logo: "https://www.themoviedb.org/assets/2/v4/logos/powered-by-tmdb-green-3e6a8a3b0c4c8c3d5a8e4e6f3e5c5b3e.png",
   resources: ["catalog", "meta"],
   types: ["movie"],
-  idPrefixes: ["tmdb:"],
   catalogs: [
     {
       type: "movie",
       id: "ceske-vanocni-pohadky",
-      name: "České vánoční pohádky"
+      name: "České vánoční pohádky",
+      extra: [
+        {
+          name: "skip",
+          isRequired: false
+        }
+      ]
     }
-  ]
+  ],
+  idPrefixes: ["tmdb:"]
 };
 
 const builder = new addonBuilder(manifest);
 
-let cache = {
-  time: 0,
-  movies: []
-};
+const cache = new Map();
+const CACHE_TIME = 6 * 60 * 60 * 1000;
 
-async function tmdb(endpoint, params = {}) {
-  const url = new URL(
-    `https://api.themoviedb.org/3${endpoint}`
-  );
+async function tmdb(path, params = {}) {
+  const url = new URL(BASE_URL + path);
 
-  url.searchParams.set("api_key", API_KEY);
-  url.searchParams.set("language", LANGUAGE);
+  url.searchParams.set("api_key", TMDB_API_KEY);
+  url.searchParams.set("language", "cs-CZ");
 
   for (const [key, value] of Object.entries(params)) {
-    url.searchParams.set(key, value);
+    if (value !== undefined && value !== null) {
+      url.searchParams.set(key, String(value));
+    }
   }
 
   const response = await fetch(url);
 
   if (!response.ok) {
-    throw new Error(`TMDB error: ${response.status}`);
+    throw new Error(
+      `TMDB API chyba: ${response.status} ${response.statusText}`
+    );
   }
 
   return response.json();
 }
 
-function normalize(text = "") {
-  return text
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+async function getMovieDetails(id) {
+  return tmdb(`/movie/${id}`, {
+    append_to_response: "keywords",
+    language: "cs-CZ"
+  });
 }
 
-function isChristmas(movie, keywords = []) {
-  const text = normalize([
+function isCzechMovie(movie) {
+  const countries = movie.production_countries || [];
+
+  return countries.some(
+    country => country.iso_3166_1 === "CZ" ||
+               country.iso_3166_1 === "CS" ||
+               country.iso_3166_1 === "SK"
+  );
+}
+
+function isFairytale(movie) {
+  const genres = (movie.genres || []).map(g => g.name.toLowerCase());
+
+  const keywords = (
+    movie.keywords?.keywords || []
+  ).map(k => k.name.toLowerCase());
+
+  const text = [
     movie.title,
     movie.original_title,
     movie.overview,
-    ...keywords.map(k => k.name)
-  ].join(" "));
+    ...keywords
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
 
-  return [
+  const fairytaleWords = [
+    "pohádka",
+    "pohadka",
+    "fairy tale",
+    "fairytale",
+    "princezna",
+    "princ",
+    "král",
+    "kral",
+    "čert",
+    "cert",
+    "anděl",
+    "andel",
+    "kouzlo",
+    "kouzelný",
+    "kouzelny",
+    "čaroděj",
+    "carodej"
+  ];
+
+  const christmasWords = [
+    "vánoce",
     "vanoce",
+    "vánoční",
     "vanocni",
-    "stedry vecer",
-    "stedry den",
     "christmas",
-    "advent"
-  ].some(word => text.includes(normalize(word)));
-}
+    "christmas eve",
+    "štědrý den",
+    "stedry den"
+  ];
 
-function isFairytale(movie, keywords = []) {
-  const genres = movie.genres?.map(g => g.id)
-    || movie.genre_ids
-    || [];
+  const hasFairytaleGenre =
+    genres.includes("fantasy") ||
+    genres.includes("family") ||
+    genres.includes("rodinný") ||
+    genres.includes("rodinný film");
 
-  const text = normalize([
-    movie.title,
-    movie.original_title,
-    movie.overview,
-    ...keywords.map(k => k.name)
-  ].join(" "));
+  const hasFairytaleWord = fairytaleWords.some(word =>
+    text.includes(word)
+  );
+
+  const hasChristmasWord = christmasWords.some(word =>
+    text.includes(word)
+  );
 
   return (
-    genres.includes(14) ||
-    genres.includes(10751) ||
-    text.includes("pohadka") ||
-    text.includes("fairy tale")
+    (hasFairytaleGenre && hasChristmasWord) ||
+    (hasFairytaleWord && hasChristmasWord)
   );
 }
 
-async function loadMovies() {
-  if (
-    cache.movies.length &&
-    Date.now() - cache.time < CACHE_TIME
-  ) {
-    return cache.movies;
+async function searchMovies() {
+  const cached = cache.get("movies");
+
+  if (cached && Date.now() - cached.time < CACHE_TIME) {
+    return cached.data;
   }
 
-  const candidates = new Map();
+  console.log("Načítám pohádky z TMDB...");
 
-  // České a slovenské fantasy a rodinné filmy
-  for (const country of ["CZ", "SK"]) {
-    for (const genre of ["14", "10751"]) {
-      for (let page = 1; page <= 5; page++) {
-        const result = await tmdb("/discover/movie", {
-          with_origin_country: country,
-          with_genres: genre,
-          sort_by: "popularity.desc",
-          include_adult: "false",
-          page
-        });
+  const movieMap = new Map();
 
-        for (const movie of result.results || []) {
-          candidates.set(movie.id, movie);
-        }
-
-        if (page >= result.total_pages) break;
-      }
-    }
-  }
-
-  // Další hledání vánočních filmů
-  for (const query of [
+  // Vyhledávání podle názvů
+  const searches = [
     "Vánoce",
     "Vánoční pohádka",
-    "Christmas"
-  ]) {
-    const result = await tmdb("/search/movie", {
-      query,
-      region: "CZ"
-    });
+    "Christmas",
+    "Christmas fairy tale",
+    "Česká pohádka",
+    "České pohádky"
+  ];
 
-    for (const movie of result.results || []) {
-      candidates.set(movie.id, movie);
+  for (const query of searches) {
+    try {
+      const result = await tmdb("/search/movie", {
+        query,
+        page: 1,
+        include_adult: false
+      });
+
+      for (const movie of result.results || []) {
+        movieMap.set(movie.id, movie);
+      }
+    } catch (error) {
+      console.error("Chyba při hledání:", query, error.message);
     }
   }
 
-  const output = [];
+  // Vyhledávání českých filmů podle země a žánru
+  const discoverQueries = [
+    { with_origin_country: "CZ", with_genres: "14" },
+    { with_origin_country: "CZ", with_genres: "10751" },
+    { with_origin_country: "SK", with_genres: "14" },
+    { with_origin_country: "SK", with_genres: "10751" }
+  ];
 
-  const list = [...candidates.values()];
+  for (const params of discoverQueries) {
+    try {
+      const result = await tmdb("/discover/movie", {
+        ...params,
+        sort_by: "popularity.desc",
+        page: 1,
+        include_adult: false
+      });
 
-  // Detailní kontrola TMDB metadat
-  for (let i = 0; i < list.length; i += 8) {
-    const batch = list.slice(i, i + 8);
+      for (const movie of result.results || []) {
+        movieMap.set(movie.id, movie);
+      }
+    } catch (error) {
+      console.error("Chyba při načítání filmů:", error.message);
+    }
+  }
+
+  const movies = [...movieMap.values()];
+
+  const detailedMovies = [];
+
+  // Podrobnosti načítáme po menších dávkách
+  for (let i = 0; i < movies.length; i += 5) {
+    const batch = movies.slice(i, i + 5);
 
     const details = await Promise.all(
-      batch.map(movie =>
-        tmdb(`/movie/${movie.id}`, {
-          append_to_response: "keywords"
-        }).catch(() => movie)
-      )
+      batch.map(async movie => {
+        try {
+          return await getMovieDetails(movie.id);
+        } catch (error) {
+          console.error(
+            "Chyba detailu filmu:",
+            movie.id,
+            error.message
+          );
+          return null;
+        }
+      })
     );
 
-    for (const movie of details) {
-      const keywords =
-        movie.keywords?.keywords || [];
-
-      if (
-        !isChristmas(movie, keywords) ||
-        !isFairytale(movie, keywords)
-      ) {
-        continue;
-      }
-
-      output.push({
-        id: `tmdb:${movie.id}`,
-        type: "movie",
-        name: movie.title || movie.original_title,
-        poster: movie.poster_path
-          ? `https://image.tmdb.org/t/p/w500${movie.poster_path}`
-          : undefined,
-        background: movie.backdrop_path
-          ? `https://image.tmdb.org/t/p/w1280${movie.backdrop_path}`
-          : undefined,
-        description: movie.overview || "",
-        releaseInfo: movie.release_date?.slice(0, 4),
-        imdbRating: movie.vote_average
-          ? movie.vote_average.toFixed(1)
-          : undefined,
-        genres: movie.genres?.map(g => g.name) || [],
-        links: [{
-          name: "TMDB",
-          category: "imdb",
-          url: `https://www.themoviedb.org/movie/${movie.id}`
-        }],
-        _popularity: Number(movie.popularity || 0)
-      });
-    }
+    detailedMovies.push(...details.filter(Boolean));
   }
 
-  // Nejdříve nejpopulárnější
-  output.sort(
-    (a, b) => b._popularity - a._popularity
-  );
+  const filtered = detailedMovies
+    .filter(movie => {
+      if (!movie.id) return false;
+      if (!movie.poster_path) return false;
+      if (!isCzechMovie(movie)) return false;
+      return isFairytale(movie);
+    })
+    .sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
 
-  cache = {
+  cache.set("movies", {
     time: Date.now(),
-    movies: output
-  };
+    data: filtered
+  });
 
-  console.log(`Načteno pohádek: ${output.length}`);
+  console.log(`Nalezeno pohádek: ${filtered.length}`);
 
-  return output;
+  return filtered;
 }
 
-builder.defineCatalogHandler(async ({ id, extra }) => {
-  if (id !== "ceske-vanocni-pohadky") {
-    return { metas: [] };
-  }
+function toStremioMeta(movie) {
+  return {
+    id: `tmdb:${movie.id}`,
+    type: "movie",
+    name: movie.title || movie.original_title,
+    poster: movie.poster_path
+      ? `https://image.tmdb.org/t/p/w500${movie.poster_path}`
+      : undefined,
+    background: movie.backdrop_path
+      ? `https://image.tmdb.org/t/p/w1280${movie.backdrop_path}`
+      : undefined,
+    description: movie.overview || "",
+    releaseInfo: movie.release_date
+      ? movie.release_date.substring(0, 4)
+      : undefined,
+    genres: (movie.genres || []).map(g => g.name),
+    imdbRating: movie.vote_average
+      ? movie.vote_average.toFixed(1)
+      : undefined,
+    runtime: movie.runtime || undefined
+  };
+}
 
+builder.defineCatalogHandler(async ({ extra }) => {
   try {
-    const movies = await loadMovies();
+    const movies = await searchMovies();
 
-    const skip = Number(extra?.skip || 0);
+    const skip = Math.max(0, Number(extra?.skip || 0));
+    const pageSize = 100;
+
+    const page = movies.slice(skip, skip + pageSize);
 
     return {
-      metas: movies.slice(skip, skip + 100)
-        .map(({ _popularity, ...movie }) => movie)
+      metas: page.map(toStremioMeta)
     };
   } catch (error) {
-    console.error(error);
-    return { metas: [] };
+    console.error("Chyba katalogu:", error);
+
+    return {
+      metas: []
+    };
   }
 });
 
-builder.defineMetaHandler(async ({ type, id }) => {
-  if (type !== "movie" || !id.startsWith("tmdb:")) {
-    return { meta: null };
-  }
-
-  const movieId = id.replace("tmdb:", "");
-
+builder.defineMetaHandler(async ({ id }) => {
   try {
-    const movie = await tmdb(`/movie/${movieId}`);
+    if (!id.startsWith("tmdb:")) {
+      return { meta: null };
+    }
+
+    const tmdbId = id.replace("tmdb:", "");
+
+    if (!/^\d+$/.test(tmdbId)) {
+      return { meta: null };
+    }
+
+    const movie = await getMovieDetails(tmdbId);
 
     return {
-      meta: {
-        id,
-        type: "movie",
-        name: movie.title,
-        poster: movie.poster_path
-          ? `https://image.tmdb.org/t/p/w500${movie.poster_path}`
-          : undefined,
-        background: movie.backdrop_path
-          ? `https://image.tmdb.org/t/p/w1280${movie.backdrop_path}`
-          : undefined,
-        description: movie.overview,
-        releaseInfo: movie.release_date?.slice(0, 4),
-        imdbRating: movie.vote_average?.toFixed(1)
-      }
+      meta: toStremioMeta(movie)
     };
   } catch (error) {
-    console.error(error);
-    return { meta: null };
+    console.error("Chyba metadat:", error);
+
+    return {
+      meta: null
+    };
   }
 });
 
-serveHTTP(builder.getInterface(), {
+const addonInterface = builder.getInterface();
+
+serveHTTP(addonInterface, {
   port: PORT
 });
 
-console.log(`Addon běží na portu ${PORT}`);
+console.log(`České vánoční pohádky addon běží na portu ${PORT}`);
