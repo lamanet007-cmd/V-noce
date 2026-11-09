@@ -14,7 +14,7 @@ app.use((req, res, next) => {
 
 const manifest = {
     id: 'org.drsnak.czechchristmasfairytales',
-    version: '2.0.0',
+    version: '2.1.0',
     name: 'České Vánoční Pohádky',
     description: 'Kompletní dynamický katalog českých a československých pohádek ze serveru TMDB.',
     resources: ['catalog'],
@@ -37,31 +37,27 @@ app.get('/catalog/movie/cz_xmas_fairytales.json', async (req, res) => {
     try {
         let allMovies = [];
         
-        // 1. Prohledáme TMDB na dotaz "pohádka" (projdeme první 3 stránky kvůli relevanci)
+        // 1. Vyhledání podle klíčového slova "pohádka"
         for (let page = 1; page <= 3; page++) {
             const searchUrl = `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&language=cs-CZ&query=pohádka&page=${page}`;
             const response = await fetch(searchUrl);
             if (response.ok) {
                 const data = await response.json();
-                if (data.results) {
-                    allMovies = allMovies.concat(data.results);
-                }
+                if (data.results) allMovies = allMovies.concat(data.results);
             }
         }
 
-        // 2. Přidáme i české/československé rodinné filmy a fantasy z Discover (filtr podle země CZ a CSK)
+        // 2. Discover českých/československých filmů v žánru rodinný/fantasy
         for (let page = 1; page <= 3; page++) {
             const discoverUrl = `https://api.themoviedb.org/3/discover/movie?api_key=${TMDB_API_KEY}&language=cs-CZ&with_origin_country=CZ|CS&with_genres=10751,14&page=${page}`;
             const response = await fetch(discoverUrl);
             if (response.ok) {
                 const data = await response.json();
-                if (data.results) {
-                    allMovies = allMovies.concat(data.results);
-                }
+                if (data.results) allMovies = allMovies.concat(data.results);
             }
         }
 
-        // Odstranění duplicit podle ID filmu na TMDB
+        // Odstranění duplicit
         const uniqueMoviesMap = new Map();
         allMovies.forEach(movie => {
             if (movie && movie.id && movie.poster_path) {
@@ -71,13 +67,12 @@ app.get('/catalog/movie/cz_xmas_fairytales.json', async (req, res) => {
 
         const uniqueMovies = Array.from(uniqueMoviesMap.values());
 
-        // Pro každý film musíme získat detail, abychom vytáhli `imdb_id` (Stremio ho nutně vyžaduje pro scrapery)
+        // Získání detailů kvůli IMDb ID
         const detailedMoviesPromises = uniqueMovies.map(async (movie) => {
             try {
                 const detailRes = await fetch(`https://api.themoviedb.org/3/movie/${movie.id}?api_key=${TMDB_API_KEY}&language=cs-CZ`);
                 if (!detailRes.ok) return null;
-                const detail = await detailRes.json();
-                return detail;
+                return await detailRes.json();
             } catch (err) {
                 return null;
             }
@@ -85,12 +80,12 @@ app.get('/catalog/movie/cz_xmas_fairytales.json', async (req, res) => {
 
         const detailedMovies = await Promise.all(detailedMoviesPromises);
 
-        // Filtrujeme jen ty, které mají platné IMDb ID, a seřadíme je sestupně dle popularity
+        // Filtrování: platné IMDb ID + musí mít poster_path
         const validMovies = detailedMovies
-            .filter(item => item && item.imdb_id)
+            .filter(item => item && item.imdb_id && item.poster_path)
             .sort((a, b) => b.popularity - a.popularity);
 
-        // Mapování na Stremio Meta formát
+        // Mapování na Stremio meta formát
         const metas = validMovies.map(movie => ({
             id: movie.imdb_id,
             type: 'movie',
@@ -102,11 +97,11 @@ app.get('/catalog/movie/cz_xmas_fairytales.json', async (req, res) => {
 
         res.json({ metas });
     } catch (error) {
-        console.error('Chyba při dynamickém načítání katalogu:', error);
+        console.error('Chyba při načítání:', error);
         res.json({ metas: [] });
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`Dramatický pohádkový addon běží na portu ${PORT}`);
+    console.log(`Addon běží na portu ${PORT}`);
 });
