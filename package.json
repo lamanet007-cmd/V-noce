@@ -1,6 +1,7 @@
+
 {
   "name": "ceske-vanocni-pohadky",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "České a československé pohádky pro Stremio",
   "type": "module",
   "scripts": {
