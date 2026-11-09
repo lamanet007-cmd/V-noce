@@ -14,7 +14,7 @@ app.use((req, res, next) => {
 
 const manifest = {
     id: 'org.drsnak.czechchristmasfairytales',
-    version: '2.1.0',
+    version: '2.2.0',
     name: 'České Vánoční Pohádky',
     description: 'Kompletní dynamický katalog českých a československých pohádek ze serveru TMDB.',
     resources: ['catalog'],
@@ -37,7 +37,6 @@ app.get('/catalog/movie/cz_xmas_fairytales.json', async (req, res) => {
     try {
         let allMovies = [];
         
-        // 1. Vyhledání podle klíčového slova "pohádka"
         for (let page = 1; page <= 3; page++) {
             const searchUrl = `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&language=cs-CZ&query=pohádka&page=${page}`;
             const response = await fetch(searchUrl);
@@ -47,7 +46,6 @@ app.get('/catalog/movie/cz_xmas_fairytales.json', async (req, res) => {
             }
         }
 
-        // 2. Discover českých/československých filmů v žánru rodinný/fantasy
         for (let page = 1; page <= 3; page++) {
             const discoverUrl = `https://api.themoviedb.org/3/discover/movie?api_key=${TMDB_API_KEY}&language=cs-CZ&with_origin_country=CZ|CS&with_genres=10751,14&page=${page}`;
             const response = await fetch(discoverUrl);
@@ -57,7 +55,6 @@ app.get('/catalog/movie/cz_xmas_fairytales.json', async (req, res) => {
             }
         }
 
-        // Odstranění duplicit
         const uniqueMoviesMap = new Map();
         allMovies.forEach(movie => {
             if (movie && movie.id && movie.poster_path) {
@@ -67,7 +64,6 @@ app.get('/catalog/movie/cz_xmas_fairytales.json', async (req, res) => {
 
         const uniqueMovies = Array.from(uniqueMoviesMap.values());
 
-        // Získání detailů kvůli IMDb ID
         const detailedMoviesPromises = uniqueMovies.map(async (movie) => {
             try {
                 const detailRes = await fetch(`https://api.themoviedb.org/3/movie/${movie.id}?api_key=${TMDB_API_KEY}&language=cs-CZ`);
@@ -80,20 +76,23 @@ app.get('/catalog/movie/cz_xmas_fairytales.json', async (req, res) => {
 
         const detailedMovies = await Promise.all(detailedMoviesPromises);
 
-        // Filtrování: platné IMDb ID + musí mít poster_path
         const validMovies = detailedMovies
             .filter(item => item && item.imdb_id && item.poster_path)
             .sort((a, b) => b.popularity - a.popularity);
 
-        // Mapování na Stremio meta formát
-        const metas = validMovies.map(movie => ({
-            id: movie.imdb_id,
-            type: 'movie',
-            name: movie.title || movie.original_title,
-            poster: `https://image.tmdb.org/t/p/w500${movie.poster_path}`,
-            description: movie.overview || 'Česká pohádka.',
-            releaseInfo: movie.release_date ? movie.release_date.split('-')[0] : ''
-        }));
+        const metas = validMovies.map(movie => {
+            const posterUrl = `https://image.tmdb.org/t/p/w500${movie.poster_path}`;
+            return {
+                id: movie.imdb_id,
+                type: 'movie',
+                name: movie.title || movie.original_title,
+                poster: posterUrl,
+                posterShape: 'poster',
+                background: movie.backdrop_path ? `https://image.tmdb.org/t/p/w1280${movie.backdrop_path}` : posterUrl,
+                description: movie.overview || 'Česká pohádka.',
+                releaseInfo: movie.release_date ? movie.release_date.split('-')[0] : ''
+            };
+        });
 
         res.json({ metas });
     } catch (error) {
